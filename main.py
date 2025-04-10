@@ -1,0 +1,380 @@
+import asyncio
+import random
+from telethon import TelegramClient, events
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# بيانات الحساب
+api_id = 29140676
+api_hash = "4243c5d2b35d3a536dac64edbbefb76f"
+session_name = "my_account"
+bot_token = "7415434367:AAH6FIBRJP95xrPkKLZYocPktnrc1wptZVk"
+OWNER_ID = 7290314430  # آيدي المالك
+
+# المتغيرات العامة
+target_chat = None
+target_users = []  # للمحادثات الجماعية
+private_targets = []  # للمحادثات الخاصة
+messages_list = ["مرحبا", "كيف حالك", "اهلا"]
+is_running = False
+delay = 2  # السرعة الافتراضية
+private_mode = False  # وضع الخاص
+random_reply = True  # هل يرد عشوائياً أم لا
+reply_probability = 50  # نسبة الرد على الرسائل (50%)
+current_input_state = None  # لتتبع حالة الإدخال الحالية
+
+# تتبع آخر رسالة والردود
+last_message_id = None
+reply_task = None
+last_sent_message = None  # لتجنب تكرار الرسالة نفسها
+
+# تهيئة Telethon و Aiogram
+client = TelegramClient(session_name, api_id, api_hash)
+bot = Bot(token=bot_token)
+dp = Dispatcher(bot)
+
+async def send_reply(chat_id, reply_to):
+    global last_sent_message
+    
+    try:
+        # إنشاء نسخة من الرسائل المتاحة
+        available_messages = [msg for msg in messages_list if msg != last_sent_message]
+        if not available_messages:  # إذا كانت كل الرسائل متشابهة
+            available_messages = messages_list.copy()
+            
+        message = random.choice(available_messages)
+        last_sent_message = message
+        
+        if random_reply and random.randint(1, 100) <= reply_probability:
+            await client.send_message(
+                entity=chat_id,
+                message=message,
+                reply_to=reply_to
+            )
+            print(f"تم الرد على الرسالة {reply_to} بـ: {message}")
+        else:
+            await client.send_message(
+                entity=chat_id,
+                message=message
+            )
+            print(f"تم إرسال رسالة جديدة: {message}")
+    except Exception as e:
+        print(f"خطأ في الإرسال: {str(e)}")
+
+async def continuous_replying(chat_id):
+    global last_message_id
+    while is_running:
+        if last_message_id:
+            await send_reply(chat_id, last_message_id)
+        await asyncio.sleep(delay)
+
+@client.on(events.NewMessage)
+async def handle_new_message(event):
+    global last_message_id, reply_task
+
+    if not is_running:
+        return
+
+    try:
+        sender = await event.get_sender()
+        chat_id = str(event.chat_id).replace("-", "")
+        
+        if private_mode:
+            if str(sender.id) in private_targets:
+                last_message_id = event.id
+                if reply_task is None:
+                    reply_task = asyncio.create_task(continuous_replying(event.chat_id))
+        else:
+            if target_chat and int(chat_id) == target_chat:
+                for user in target_users:
+                    if (user.isdigit() and sender.id == int(user)) or \
+                       (sender.username and sender.username.lower() == user.lower()):
+                        last_message_id = event.id
+                        if reply_task is None:
+                            reply_task = asyncio.create_task(continuous_replying(event.chat_id))
+                        break
+
+    except Exception as e:
+        print(f"خطأ في معالجة الرسالة: {str(e)}")
+
+def get_control_panel():
+    buttons = [
+        [InlineKeyboardButton("تشغيل ✅" if is_running else "إيقاف ⛔", callback_data="toggle")],
+        [
+            InlineKeyboardButton("وضع القروب", callback_data="set_group_mode"),
+            InlineKeyboardButton("وضع الخاص", callback_data="set_private_mode")
+        ],
+        [
+            InlineKeyboardButton("إضافة مستخدمين", callback_data="add_users"),
+            InlineKeyboardButton("إدارة المستخدمين", callback_data="manage_users")
+        ],
+        [
+            InlineKeyboardButton("تعديل الرسائل", callback_data="set_msgs"),
+            InlineKeyboardButton("تعديل السرعة", callback_data="set_delay"),
+            InlineKeyboardButton("ضبط الردود", callback_data="set_reply_mode")
+        ],
+        [InlineKeyboardButton("عرض الإعدادات", callback_data="status")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@dp.message_handler(commands=['start'])
+async def start_command(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        await message.reply("🚀 لوحة تحكم البوت الآلي", reply_markup=get_control_panel())
+    else:
+        await message.reply("⛔ ليس لديك صلاحية الوصول إلى لوحة التحكم")
+
+@dp.message_handler(commands=['start_private'])
+async def start_private_command(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("⛔ ليس لديك صلاحية استخدام هذا الأمر")
+        return
+    
+    args = message.get_args()
+    if not args:
+        await message.reply("⚠️ يرجى إرسال الآيديات بهذا الشكل:\n/start_private 123456789.987654321")
+        return
+    
+    global private_targets, private_mode, is_running
+    private_targets = [uid.strip() for uid in args.split(".") if uid.strip()]
+    private_mode = True
+    is_running = True
+    
+    await message.reply(
+        f"✅ تم تشغيل وضع الخاص على {len(private_targets)} مستخدم:\n" +
+        "\n".join([f"• {uid}" for uid in private_targets]),
+        reply_markup=get_control_panel()
+    )
+
+@dp.callback_query_handler()
+async def callback_handler(query: types.CallbackQuery):
+    global current_input_state
+    
+    if query.from_user.id != OWNER_ID:
+        await query.answer("⛔ ليس لديك صلاحية الوصول", show_alert=True)
+        return
+        
+    global is_running, target_chat, target_users, private_targets, messages_list, delay, reply_task, private_mode, random_reply, reply_probability
+
+    try:
+        if query.data == "toggle":
+            is_running = not is_running
+            if not is_running and reply_task:
+                reply_task.cancel()
+                reply_task = None
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+            await query.answer(f"تم {'تشغيل' if is_running else 'إيقاف'} البوت")
+
+        elif query.data == "set_group_mode":
+            private_mode = False
+            await query.answer("تم تفعيل وضع القروب")
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "set_private_mode":
+            private_mode = True
+            await query.answer("تم تفعيل وضع الخاص")
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "add_users":
+            current_input_state = "add_users"
+            if private_mode:
+                await query.message.edit_text("👤 أرسل آيديات المستخدمين للخاص مفصولة بنقاط (مثال: 123456789.987654321):")
+            else:
+                await query.message.edit_text("👥 أرسل أسماء المستخدمين أو الآيديات مفصولة بفاصلة (مثال: user1,123456,@user2):")
+
+        elif query.data == "manage_users":
+            users_list = private_targets if private_mode else target_users
+            users_text = "\n".join([f"{i+1}. {user}" for i, user in enumerate(users_list)]) if users_list else "لا يوجد مستخدمين مضافين"
+            
+            await query.message.edit_text(
+                f"👥 المستخدمون الحاليون ({'الخاص' if private_mode else 'القروب'}):\n{users_text}\n\n"
+                "استخدم الأزرار أدناه لإدارة المستخدمين",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("إضافة مستخدم", callback_data="add_user"),
+                     InlineKeyboardButton("حذف مستخدم", callback_data="remove_user")],
+                    [InlineKeyboardButton("حذف الكل", callback_data="clear_users"),
+                     InlineKeyboardButton("رجوع", callback_data="back")]
+                ])
+            )
+
+        elif query.data == "add_user":
+            current_input_state = "add_user"
+            await query.message.edit_text("👤 أرسل اسم المستخدم أو الآيدي لإضافته:")
+
+        elif query.data == "remove_user":
+            users_list = private_targets if private_mode else target_users
+            if not users_list:
+                await query.answer("❌ لا يوجد مستخدمين لإزالتهم", show_alert=True)
+                return
+                
+            buttons = [
+                [InlineKeyboardButton(user, callback_data=f"remove_{i}")] 
+                for i, user in enumerate(users_list)
+            ]
+            buttons.append([InlineKeyboardButton("رجوع", callback_data="manage_users")])
+            await query.message.edit_text(
+                "اختر المستخدم الذي تريد حذفه:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
+
+        elif query.data.startswith("remove_"):
+            index = int(query.data.split("_")[1])
+            if private_mode:
+                removed_user = private_targets.pop(index)
+            else:
+                removed_user = target_users.pop(index)
+                
+            await query.message.edit_text(
+                f"✅ تم حذف المستخدم: {removed_user}",
+                reply_markup=get_control_panel())
+            await query.answer(f"تم حذف {removed_user}")
+
+        elif query.data == "clear_users":
+            if private_mode:
+                private_targets.clear()
+            else:
+                target_users.clear()
+            await query.answer("✅ تم حذف جميع المستخدمين", show_alert=True)
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "back":
+            current_input_state = None
+            await query.message.edit_text("🚀 لوحة تحكم البوت الآلي", reply_markup=get_control_panel())
+
+        elif query.data == "set_msgs":
+            current_input_state = "set_msgs"
+            await query.message.edit_text("💬 أرسل الرسائل مفصولة بفاصلة (مثال: اهلا,مرحبا,كيفك):")
+
+        elif query.data == "set_delay":
+            current_input_state = "set_delay"
+            await query.message.edit_text("⏱ أرسل عدد الثواني بين الرسائل (يمكن أن يكون كسر مثل 0.1):")
+
+        elif query.data == "set_reply_mode":
+            await query.message.edit_text(
+                "🔀 اختر وضع الرد:\n\n"
+                "1. الرد العشوائي على الرسائل (50% رد، 50% رسالة جديدة)\n"
+                "2. الرد دائماً على الرسائل\n"
+                "3. إرسال رسائل جديدة دائماً\n\n"
+                "أو أرسل النسبة المئوية للرد (مثال: 70 لضبط 70% ردود و30% رسائل جديدة)",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("وضع عشوائي (50%)", callback_data="set_random_reply")],
+                    [InlineKeyboardButton("الرد دائماً", callback_data="set_always_reply")],
+                    [InlineKeyboardButton("رسائل جديدة دائماً", callback_data="set_never_reply")],
+                    [InlineKeyboardButton("رجوع", callback_data="back")]
+                ])
+            )
+
+        elif query.data == "set_random_reply":
+            random_reply = True
+            reply_probability = 50
+            await query.answer("✅ تم ضبط وضع الرد العشوائي (50%)")
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "set_always_reply":
+            random_reply = True
+            reply_probability = 100
+            await query.answer("✅ تم ضبط وضع الرد دائماً")
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "set_never_reply":
+            random_reply = False
+            await query.answer("✅ تم ضبط وضع إرسال رسائل جديدة دائماً")
+            await query.message.edit_reply_markup(reply_markup=get_control_panel())
+
+        elif query.data == "status":
+            current_users = private_targets if private_mode else target_users
+            users_text = "\n".join(current_users) if current_users else "❌ غير محدد"
+            
+            reply_mode = ""
+            if not random_reply:
+                reply_mode = "إرسال رسائل جديدة دائماً"
+            elif reply_probability == 100:
+                reply_mode = "الرد دائماً على الرسائل"
+            else:
+                reply_mode = f"رد عشوائي ({reply_probability}% ردود)"
+            
+            status = (
+                f"⚙️ الإعدادات الحالية:\n"
+                f"• الحالة: {'🟢 نشط' if is_running else '🔴 متوقف'}\n"
+                f"• الوضع: {'🔵 خاص' if private_mode else '🟠 قروب'}\n"
+                f"• {'المستخدمون' if private_mode else 'القروب'}: \n{users_text}\n"
+                f"• عدد الرسائل: {len(messages_list)}\n"
+                f"• السرعة: كل {delay} ثانية\n"
+                f"• وضع الرد: {reply_mode}"
+            )
+            await query.message.edit_text(status, reply_markup=get_control_panel())
+
+    except Exception as e:
+        print(f"Error in callback: {str(e)}")
+        await query.answer("⚠️ حدث خطأ، يرجى المحاولة مرة أخرى")
+
+@dp.message_handler(content_types=types.ContentTypes.TEXT)
+async def handle_text_input(message: types.Message):
+    global current_input_state, target_users, private_targets, messages_list, delay, reply_probability, random_reply
+    
+    if message.from_user.id != OWNER_ID:
+        await message.reply("⛔ ليس لديك صلاحية الوصول")
+        return
+    
+    if current_input_state == "add_users":
+        if private_mode:
+            users = message.text.strip().replace("@", "").split(".")
+            private_targets = [user.strip() for user in users if user.strip()]
+            await message.reply(f"✅ تم تعيين {len(private_targets)} مستخدم للخاص", reply_markup=get_control_panel())
+        else:
+            users = message.text.strip().replace("@", "").split(",")
+            target_users = [user.strip() for user in users if user.strip()]
+            await message.reply(f"✅ تم تعيين {len(target_users)} مستخدمين", reply_markup=get_control_panel())
+        current_input_state = None
+    
+    elif current_input_state == "add_user":
+        user = message.text.strip().replace("@", "")
+        if private_mode:
+            if user not in private_targets:
+                private_targets.append(user)
+                await message.reply(f"✅ تم إضافة المستخدم للخاص: {user}", reply_markup=get_control_panel())
+            else:
+                await message.reply(f"⚠️ المستخدم {user} موجود بالفعل في قائمة الخاص", reply_markup=get_control_panel())
+        else:
+            if user not in target_users:
+                target_users.append(user)
+                await message.reply(f"✅ تم إضافة المستخدم للقروب: {user}", reply_markup=get_control_panel())
+            else:
+                await message.reply(f"⚠️ المستخدم {user} موجود بالفعل في قائمة القروب", reply_markup=get_control_panel())
+        current_input_state = None
+    
+    elif current_input_state == "set_msgs":
+        messages_list = [msg.strip() for msg in message.text.split(",") if msg.strip()]
+        await message.reply(f"✅ تم تحديث الرسائل ({len(messages_list)} رسالة)", reply_markup=get_control_panel())
+        current_input_state = None
+    
+    elif current_input_state == "set_delay":
+        try:
+            delay_input = float(message.text.strip())
+            if delay_input < 0.1:
+                await message.reply("❌ الحد الأدنى للسرعة هو 0.1 ثانية", reply_markup=get_control_panel())
+            else:
+                delay = delay_input
+                await message.reply(f"✅ تم تعيين السرعة: كل {delay} ثانية", reply_markup=get_control_panel())
+        except ValueError:
+            await message.reply("❌ يجب إدخال رقم صحيح أو كسر عشري", reply_markup=get_control_panel())
+        current_input_state = None
+    
+    # معالجة إدخال النسبة المئوية بشكل منفصل
+    elif message.text.strip().isdigit() and 1 <= int(message.text.strip()) <= 100:
+        reply_probability = int(message.text.strip())
+        random_reply = True
+        await message.reply(f"✅ تم ضبط نسبة الرد على {reply_probability}%", reply_markup=get_control_panel())
+
+async def main():
+    await client.start()
+    print("✅ تم الاتصال بحساب التليثون بنجاح")
+    await dp.start_polling()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("تم إيقاف البوت")
+    except Exception as e:
+        print(f"حدث خطأ غير متوقع: {str(e)}")
